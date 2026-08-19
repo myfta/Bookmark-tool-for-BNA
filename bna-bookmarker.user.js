@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Bookmarker for BNA
-// @namespace    https://example.com/
+// @namespace    https://github.com/myfta/Bookmark-tool-for-BNA/
 // @version      0.8
 // @description  Bookmark selections/URLs. Detects underlying <a href> in selection and saves normalized link; resilient floating BM button. Exports/imports JSON. Adds "Delete All" to clear local storage (requires typing DELETE).
 // @match        https://www.britishnewspaperarchive.com/*
