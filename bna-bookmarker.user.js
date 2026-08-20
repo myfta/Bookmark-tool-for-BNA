@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         Bookmarker for BNA
-// @namespace    https://github.com/myfta/Bookmark-tool-for-BNA/
-// @version      0.8
-// @description  Bookmark selections/URLs. Detects underlying <a href> in selection and saves normalized link; resilient floating BM button. Exports/imports JSON. Adds "Delete All" to clear local storage (requires typing DELETE).
-// @match        https://www.britishnewspaperarchive.com/*
+// @name         TM Bookmarker (link-anchor detection + delete all + XLSX export)
+// @namespace    https://example.com/
+// @version      0.9
+// @description  Bookmark selections/URLs. Detects underlying <a href> and saves normalized link; resilient floating BM button. Exports/imports JSON. Adds "Delete All" and Export .xlsx (SheetJS, falls back to CSV).
+// @match        *://*/*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_registerMenuCommand
@@ -33,12 +33,14 @@
     #tm-bm-overlay { position: fixed !important; inset:0 !important; background: rgba(0,0,0,0.35) !important; z-index: 2147483646 !important; }
     #tm-bm-modal { position: fixed !important; left: 50% !important; top: 50% !important; transform: translate(-50%,-50%) !important; z-index: 2147483647 !important; background: #fff !important; color: #000 !important; border: 1px solid #ccc !important; box-shadow: 0 8px 40px rgba(0,0,0,0.45) !important; padding: 12px !important; min-width: 320px !important; max-width: 90% !important; max-height: 80% !important; overflow:auto !important; border-radius:8px !important; }
     #tm-bm-modal input, #tm-bm-modal textarea { width:100% !important; box-sizing:border-box !important; margin:6px 0 !important; padding:8px !important; }
-    #tm-bm-actions { display:flex !important; gap:8px !important; justify-content:flex-end !important; margin-top:8px !important; }
+    #tm-bm-actions { display:flex !important; gap:8px !important; justify-content:flex-end !important; margin-top:8px !important; flex-wrap:wrap; }
     #tm-bm-list { max-height:300px !important; overflow:auto !important; border:1px solid #eee !important; padding:6px !important; background:#fafafa !important; margin-top:8px !important; }
     .tm-bm-item { padding:6px !important; border-bottom:1px dashed #ddd !important; font-size:13px !important; }
     .tm-bm-item strong { display:block !important; }
     .tm-small { font-size:12px !important; color:#666 !important; }
     .tm-link { color:#0066cc !important; text-decoration:underline !important; word-break:break-all !important; }
+    #tm-bm-deleteall { background:#e65c5c;color:#fff;border:none;padding:6px 8px;border-radius:4px; }
+    #tm-bm-export-xlsx { background:#2b8cff;color:#fff;border:none;padding:6px 8px;border-radius:4px; }
   `);
 
   // --- storage helpers ---
@@ -80,13 +82,10 @@
     if (!raw) return null;
     let url = raw.trim();
     url = stripTrailingPunctuation(url);
-    // if it's an absolute URL it stays
     if (/^https?:\/\//i.test(url)) {
       try { return new URL(url).href; } catch (e) { /* fall through */ }
     }
-    // protocol-less www.
     if (/^www\./i.test(url)) url = 'http://' + url;
-    // try to resolve relative or domain-only URLs against document.baseURI
     try {
       const resolved = new URL(url, document.baseURI);
       return resolved.href;
@@ -119,7 +118,6 @@
       if (!sel || sel.rangeCount === 0) return null;
       const range = sel.getRangeAt(0);
 
-      // check startContainer and endContainer ancestors
       const start = range.startContainer;
       const end = range.endContainer;
       let found = findAnchorAncestor(start) || findAnchorAncestor(end);
@@ -127,7 +125,6 @@
         return normalizeUrl(found.href);
       }
 
-      // check commonAncestorContainer and descendants inside the range
       const cac = range.commonAncestorContainer;
       if (cac && cac.nodeType === 1) {
         const frag = range.cloneContents();
@@ -149,7 +146,6 @@
         }
       }
 
-      // no anchor found via DOM; fall back to regex on selected text
       return extractFirstUrlWithRegex(sel.toString());
     } catch (e) {
       return null;
@@ -174,9 +170,7 @@
     try {
       await navigator.clipboard.writeText(text);
       return;
-    } catch (e) {
-      // fallback
-    }
+    } catch (e) {}
     const t = document.createElement('textarea');
     t.value = text;
     t.style.position = 'fixed';
@@ -185,6 +179,84 @@
     t.select();
     document.execCommand('copy');
     t.remove();
+  }
+
+  // --- XLSX export helpers ---
+  function loadSheetJSLib() {
+    return new Promise((resolve, reject) => {
+      if (window.XLSX) return resolve(window.XLSX);
+      const src = 'https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js';
+      const s = document.createElement('script');
+      s.src = src;
+      s.onload = () => {
+        if (window.XLSX) return resolve(window.XLSX);
+        reject(new Error('SheetJS loaded but XLSX not available'));
+      };
+      s.onerror = () => reject(new Error('Failed to load SheetJS from ' + src));
+      // append to documentElement to increase chance of loading on pages lacking head/body
+      (document.documentElement || document.head || document.body || document).appendChild(s);
+      // set timeout fallback
+      setTimeout(() => {
+        if (window.XLSX) resolve(window.XLSX);
+        else reject(new Error('Timed out loading SheetJS'));
+      }, 15000);
+    });
+  }
+
+  function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.documentElement.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  async function exportBookmarksXLSX(bookmarks) {
+    try {
+      const XLSX = await loadSheetJSLib();
+      // normalize objects to a simple array for worksheet
+      const rows = bookmarks.map(b => ({
+        id: b.id || '',
+        title: b.title || '',
+        pageurl: b.pageurl || '',
+        capture_text: b.capture_text || '',
+        capture_url: b.capture_url || '',
+        capture: b.capture || '',
+        notes: b.notes || '',
+        created_at: b.created_at || '',
+        source_hostname: b.source_hostname || '',
+        capture_is_url: b.capture_is_url ? 'true' : 'false'
+      }));
+      const ws = XLSX.utils.json_to_sheet(rows, {header: ['id','title','pageurl','capture_text','capture_url','capture','notes','created_at','source_hostname','capture_is_url']});
+      const wb = { Sheets: { 'Bookmarks': ws }, SheetNames: ['Bookmarks'] };
+      const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+      const blob = new Blob([wbout], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const filename = `tm-bookmarks-${(new Date()).toISOString().replace(/[:.]/g,'-')}.xlsx`;
+      downloadBlob(blob, filename);
+    } catch (err) {
+      console.warn('XLSX export failed, falling back to CSV:', err);
+      alert('XLSX export failed (' + (err && err.message ? err.message : err) + '). Falling back to CSV export.');
+      exportBookmarksCSV(bookmarks);
+    }
+  }
+
+  function exportBookmarksCSV(bookmarks) {
+    const headers = ['id','title','pageurl','capture_text','capture_url','capture','notes','created_at','source_hostname','capture_is_url'];
+    const rows = bookmarks.map(b => headers.map(h => {
+      const v = (b[h] == null) ? '' : String(b[h]);
+      // escape quotes
+      if (v.indexOf('"') !== -1) return '"' + v.replace(/"/g, '""') + '"';
+      // if contains comma or newline, wrap in quotes
+      if (/[,\n\r]/.test(v)) return '"' + v + '"';
+      return v;
+    }).join(','));
+    const csv = headers.join(',') + '\n' + rows.join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const filename = `tm-bookmarks-${(new Date()).toISOString().replace(/[:.]/g,'-')}.csv`;
+    downloadBlob(blob, filename);
   }
 
   // --- robust DOM insertion for button/modal ---
@@ -248,8 +320,9 @@
         <button id="tm-bm-save">Save</button>
         <button id="tm-bm-export">Export .json</button>
         <button id="tm-bm-import">Import .json</button>
+        <button id="tm-bm-export-xlsx">Export .xlsx</button>
         <button id="tm-bm-showall">View All</button>
-        <button id="tm-bm-deleteall" style="background:#e65c5c;color:#fff;border:none;padding:6px 8px;border-radius:4px;">Delete All</button>
+        <button id="tm-bm-deleteall">Delete All</button>
       </div>
       <div id="tm-bm-list" style="display:none;"></div>
     `;
@@ -270,7 +343,6 @@
         return;
       }
 
-      // attempt to detect anchor href first (if originalCapture was from selection)
       const detectedFromSelection = originalCapture ? extractHrefFromSelection() : null;
       const normalized = detectedFromSelection || extractFirstUrlWithRegex(captureField) || null;
 
@@ -327,6 +399,15 @@
         }
       });
       input.click();
+    });
+
+    modal.querySelector('#tm-bm-export-xlsx').addEventListener('click', async () => {
+      const arr = await loadBookmarks();
+      if (!arr || arr.length === 0) {
+        alert('No bookmarks to export.');
+        return;
+      }
+      await exportBookmarksXLSX(arr);
     });
 
     modal.querySelector('#tm-bm-showall').addEventListener('click', async () => {
@@ -391,7 +472,7 @@
       container.style.display = 'block';
     });
 
-    // Delete All behaviour
+    // Delete All behavior
     modal.querySelector('#tm-bm-deleteall').addEventListener('click', async () => {
       try {
         const ok = confirm('Delete ALL bookmarks? This will permanently remove all saved bookmarks from Tampermonkey storage.');
@@ -402,7 +483,6 @@
           return;
         }
         await clearBookmarks();
-        // refresh view
         const list = modal.querySelector('#tm-bm-list');
         if (list) { list.innerHTML = ''; list.style.display = 'none'; }
         alert('All bookmarks have been deleted.');
@@ -444,14 +524,12 @@
     modal.querySelector('#tm-bm-notes').value = '';
     modal.querySelector('#tm-bm-list').style.display = 'none';
 
-    // try to detect href from selection (anchor) first
     const hrefFromSelection = extractHrefFromSelection();
     if (hrefFromSelection) {
       modal.querySelector('#tm-bm-capture').value = hrefFromSelection;
       modal.querySelector('#tm-bm-original-capture').value = (initialCapture || '').trim();
       try { const host = new URL(hrefFromSelection).hostname; if (!modal.querySelector('#tm-bm-title').value) modal.querySelector('#tm-bm-title').value = host; } catch(e){}
     } else {
-      // fallback to regex detection in the initialCapture text
       const detected = extractFirstUrlWithRegex(initialCapture || '') || null;
       if (detected) {
         modal.querySelector('#tm-bm-capture').value = detected;
@@ -511,6 +589,14 @@
         a.click();
         a.remove();
         URL.revokeObjectURL(url);
+      });
+      GM_registerMenuCommand('TM Bookmarks — Export XLSX', async () => {
+        const arr = await loadBookmarks();
+        if (!arr || !arr.length) {
+          alert('No bookmarks to export.');
+          return;
+        }
+        await exportBookmarksXLSX(arr);
       });
       GM_registerMenuCommand('TM Bookmarks — Delete All', async () => {
         try {
