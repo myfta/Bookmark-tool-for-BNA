@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         TM Bookmarker (link-anchor detection + delete all + XLSX export)
-// @namespace    https://example.com/
+// @namespace    https://github.com/myfta/Bookmark-tool-for-BNA/
 // @version      0.9
 // @description  Bookmark selections/URLs. Detects underlying <a href> and saves normalized link; resilient floating BM button. Exports/imports JSON. Adds "Delete All" and Export .xlsx (SheetJS, falls back to CSV).
-// @match        *://*/*
+// @match        https://www.britishnewspaperarchive.com/*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_registerMenuCommand
